@@ -1,242 +1,116 @@
 #!/usr/bin/env bash
-# 一键安装 xray + sing-box + cloudflared（固定 Named Tunnel）
-# 两个节点都走 CF Tunnel，使用 TCP-based 协议（CF Tunnel 不支持 UDP）：
-#   - xray:      VLESS + XHTTP + TLS     (127.0.0.1:20001)
-#   - sing-box:  VLESS + WebSocket + TLS (127.0.0.1:20002)
-#
-# 用法: sudo bash install.sh
-#  脚本会交互式询问：tunnel token、tunnel 名、xray hostname、sing-box hostname
 set -euo pipefail
-
-PROXY_DIR=/opt/proxy
-
-if [[ $EUID -ne 0 ]]; then echo "❌ 请用 root 跑"; exit 1; fi
-if [[ ! -t 0 ]]; then
-  echo "❌ 需要交互输入，请在终端跑"
-  exit 1
-fi
-read -rp "Cloudflare Tunnel token（eyJh 开头的字符串）: " TUNNEL_TOKEN
-read -rp "Tunnel 名称（CF 后台显示）: " TUNNEL_NAME
-read -rp "Xray 客户端域名（CF Public Hostname，如 xray.example.com）: " XRAY_HOST
-read -rp "Sing-box 客户端域名（如 sb.example.com）: " SB_HOST
-read -rp "Xray 本地监听端口 [默认 20001]: " XRAY_PORT
-read -rp "Sing-box 本地监听端口 [默认 20002]: " SB_PORT
-XRAY_PORT=${XRAY_PORT:-20001}
-SB_PORT=${SB_PORT:-20002}
-[[ -z "$TUNNEL_TOKEN" || -z "$TUNNEL_NAME" || -z "$XRAY_HOST" || -z "$SB_HOST" ]] && {
-  echo "❌ 四项都不能为空"; exit 1; }
-[[ ! "$XRAY_PORT" =~ ^[0-9]+$ || "$XRAY_PORT" -lt 1 || "$XRAY_PORT" -gt 65535 ]] && {
-  echo "❌ Xray 端口非法"; exit 1; }
-[[ ! "$SB_PORT" =~ ^[0-9]+$ || "$SB_PORT" -lt 1 || "$SB_PORT" -gt 65535 ]] && {
-  echo "❌ Sing-box 端口非法"; exit 1; }
-[[ "$XRAY_PORT" == "$SB_PORT" ]] && {
-  echo "❌ 两个端口不能相同"; exit 1; }
-echo ""
-echo "→ Tunnel:      $TUNNEL_NAME"
-echo "→ Xray 域名:   $XRAY_HOST → 127.0.0.1:${XRAY_PORT} (VLESS+XHTTP+TLS, path=/xray)"
-echo "→ Sing-box:    $SB_HOST → 127.0.0.1:${SB_PORT} (VLESS+WS+TLS,   path=/sing940)"
-echo ""
-mkdir -p "$PROXY_DIR"
-cd "$PROXY_DIR"
-
-# 1. 下载核心（已存在则跳过）
-if [[ ! -x ./xray ]]; then
-  curl -fsSL -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-  unzip -o xray.zip xray >/dev/null && chmod +x xray && rm xray.zip
-fi
-if [[ ! -x ./sing-box ]]; then
-  ARCH=$(uname -m)
-  case "$ARCH" in
-    x86_64)  SB_ARCH=amd64 ;;
-    aarch64) SB_ARCH=arm64 ;;
-    *) echo "❌ 不支持的架构: $ARCH"; exit 1 ;;
+D=/opt/proxy; A="https://api.cloudflare.com/client/v4"
+t="";z="";xh="";sh="";xp=20001;sp=20002;tn=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tok)         t="$2"; shift 2 ;;
+    --zone)        z="$2"; shift 2 ;;
+    --xray-host)   xh="$2"; shift 2 ;;
+    --sb-host)     sh="$2"; shift 2 ;;
+    --xray-port)   xp="$2"; shift 2 ;;
+    --sb-port)     sp="$2"; shift 2 ;;
+    --tunnel-name) tn="$2"; shift 2 ;;
+    *) echo "Unknown: $1"; exit 1 ;;
   esac
-  curl -fsSL -o /tmp/sb.tar.gz \
-    "https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-${SB_ARCH}.tar.gz"
-  tar -xzf /tmp/sb.tar.gz
-  mv "sing-box-linux-${SB_ARCH}/sing-box" ./sing-box
-  chmod +x ./sing-box
-  rm -rf /tmp/sb.tar.gz "sing-box-linux-${SB_ARCH}"
-fi
-if [[ ! -x /usr/local/bin/cloudflared ]]; then
-  curl -fsSL -o /usr/local/bin/cloudflared \
-    https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-  chmod +x /usr/local/bin/cloudflared
-fi
-
-# 2. 生成凭据（已存在则保留；删 xray_keys.env / sb_keys.env 即重生成）
-if [[ ! -f $PROXY_DIR/xray_keys.env ]]; then
-  XRAY_UUID=$(./xray uuid)
-  cat > $PROXY_DIR/xray_keys.env <<EOF
-XRAY_UUID=$XRAY_UUID
-EOF
-fi
-# shellcheck disable=SC1091
-source $PROXY_DIR/xray_keys.env
-
-if [[ ! -f $PROXY_DIR/sb_keys.env ]]; then
-  SB_UUID=$(./sing-box generate uuid)
-  echo "SB_UUID=$SB_UUID" > $PROXY_DIR/sb_keys.env
-fi
-# shellcheck disable=SC1091
-source $PROXY_DIR/sb_keys.env
-
-# 3. xray 配置 (VLESS + XHTTP + TLS) → 127.0.0.1:${XRAY_PORT}
-# XHTTP = SplitHTTP (POST 分片上传)，CDN 友好；过 CF Tunnel 必须用 TLS + 真实 SNI
-cat > $PROXY_DIR/config.json <<EOF
-{
-  "log": {"loglevel": "warning"},
-  "inbounds": [{
-    "listen": "127.0.0.1", "port": ${XRAY_PORT}, "protocol": "vless",
-    "settings": {
-      "clients": [{"id": "$XRAY_UUID"}],
-      "decryption": "none"
-    },
-    "streamSettings": {
-      "network": "xhttp",
-      "xhttpSettings": {
-        "path": "/xray"
-      }
-    }
-  }],
-  "outbounds": [{"protocol": "freedom", "tag": "direct"}]
+done
+xh="${xh:-xray.${z}}";sh="${sh:-sb.${z}}"
+tn="${tn:-vps-$(tr -dc a-z0-9 < /dev/urandom | head -c8)}"
+[[ -z "${t}" || -z "${z}" ]] && { echo "Usage: --tok TOKEN --zone example.com"; exit 1; }
+[[ $EUID -ne 0 ]] && { echo "Run as root"; exit 1; }
+echo "=== Zone:$z Xray:$xh:$xp SB:$sh:$sp ==="
+apt-get update -qq && apt-get install -y -qq jq curl unzip 2>/dev/null
+_c() {
+  local m="$1" p="$2" d="${3:-}"
+  if [[ -n "$d" ]]; then curl -sf -X "$m" -H "Authorization: Bearer ${t}" -H "Content-Type: application/json" "$A$p" -d "$d"
+  else curl -sf -X "$m" -H "Authorization: Bearer ${t}" "$A$p"; fi
 }
-EOF
-
-# 4. sing-box 配置 (VLESS + WebSocket + TLS) → 127.0.0.1:${SB_PORT}
-# WebSocket 是最兼容的 CDN 协议，sing-box 完整支持
-cat > $PROXY_DIR/sb-config.json <<EOF
-{
-  "log": {"level": "warn"},
-  "inbounds": [{
-    "type": "vless",
-    "listen": "127.0.0.1",
-    "listen_port": ${SB_PORT},
-    "users": [{"uuid": "$SB_UUID", "name": "client"}],
-    "transport": {
-      "type": "ws",
-      "path": "/sing940"
-    }
-  }],
-  "outbounds": [{"type": "direct", "tag": "direct"}]
-}
-EOF
-
-# 5. cloudflared 配置 + token 落盘
-mkdir -p /etc/cloudflared
-echo "$TUNNEL_TOKEN" > /etc/cloudflared/$TUNNEL_NAME.token
-chmod 600 /etc/cloudflared/$TUNNEL_NAME.token
-
-# XHTTP 必须走 HTTP ingress（XHTTP = HTTP POST 分片）
-# WebSocket 也走 HTTP ingress（CF Tunnel 会自动 Upgrade）
-cat > /etc/cloudflared/config.yml <<EOF
-tunnel: $TUNNEL_NAME
-metrics: 127.0.0.1:20000
-protocol: quic
-no-autoupdate: true
-ingress:
-  - hostname: $XRAY_HOST
-    service: http://127.0.0.1:${XRAY_PORT}
-    originRequest: { noTLSVerify: true }
-  - hostname: $SB_HOST
-    service: http://127.0.0.1:${SB_PORT}
-    originRequest: { noTLSVerify: true }
-  - service: http_status:404
-EOF
-
-# 6. systemd 单元
-cat > /etc/systemd/system/xray-proxy.service <<EOF
+echo ">>> Verify..."
+_c GET /user/tokens/verify | python3 -c "import sys,json;sys.exit(0 if json.load(sys.stdin).get('success') else 1)" || { echo "BAD TOKEN"; exit 1; }
+echo ">>> Account..."
+ai=$(_c GET /accounts | jq -r '.result[0].id')
+[[ -z "$ai" || "$ai" == "null" ]] && { echo "No account"; exit 1; }
+echo ">>> Zone..."
+zi=$(_c GET "/zones?name=$z" | jq -r '.result[0].id')
+[[ -z "$zi" || "$zi" == "null" ]] && { echo "Zone not found"; exit 1; }
+echo ">>> Tunnel..."
+ts=$(python3 -c "import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())")
+ti=$(_c POST "/accounts/$ai/tunnels" "{\"name\":\"$tn\",\"tunnel_secret\":\"$ts\"}" | jq -r '.result.id')
+[[ -z "$ti" || "$ti" == "null" ]] && { echo "Tunnel fail"; exit 1; }
+tk=$(_c GET "/accounts/$ai/tunnels/$ti" | jq -r '.result.token')
+[[ -z "$tk" || "$tk" == "null" ]] && { echo "Token fail"; exit 1; }
+echo ">>> DNS..."
+cn="$ti.cfargotunnel.com"
+for h in "$xh" "$sh"; do
+  _c POST "/zones/$zi/dns_records" "{\"type\":\"CNAME\",\"name\":\"$h\",\"content\":\"$cn\",\"proxied\":true}" > /dev/null 2>&1 && echo "  OK: $h" || {
+    ri=$(_c GET "/zones/$zi/dns_records?type=CNAME&name=$h" | jq -r '.result[0].id')
+    [[ -n "$ri" && "$ri" != "null" ]] && { _c PATCH "/zones/$zi/dns_records/$ri" "{\"type\":\"CNAME\",\"name\":\"$h\",\"content\":\"$cn\",\"proxied\":true}" > /dev/null; echo "  Updated: $h"; }
+  }
+done
+echo ">>> Ingress..."
+ig=$(python3 -c "import json;print(json.dumps({'config':{'ingress':[{'hostname':'$xh','service':'http://127.0.0.1:$xp','originRequest':{'noTLSVerify':True}},{'hostname':'$sh','service':'http://127.0.0.1:$sp','originRequest':{'noTLSVerify':True}},{'service':'http_status:404'}]}}))")
+_c PUT "/accounts/$ai/tunnels/$ti/configurations" "$ig" > /dev/null
+echo ">>> Binaries..."
+mkdir -p "$D" && cd "$D"
+if [[ ! -x ./xray ]]; then curl -fsSLo xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip; unzip -o xray.zip xray >/dev/null && chmod +x xray && rm xray.zip; fi
+if [[ ! -x ./sing-box ]]; then
+  ar=$(uname -m); case "$ar" in x86_64) sa=amd64;; aarch64) sa=arm64;; *) echo "Bad arch"; exit 1;; esac
+  curl -fsSLo /tmp/sb.tar.gz "https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-${sa}.tar.gz"
+  tar -xzf /tmp/sb.tar.gz; mv "sing-box-linux-${sa}/sing-box" ./sing-box; chmod +x ./sing-box; rm -rf /tmp/sb.tar.gz "sing-box-linux-${sa}"
+fi
+if [[ ! -x /usr/local/bin/cloudflared ]]; then curl -fsSLo /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64; chmod +x /usr/local/bin/cloudflared; fi
+echo ">>> Keys..."
+[[ ! -f xray_keys.env ]] && { xu=$(./xray uuid); printf 'XRAY_UUID=%s\n' "$xu" > xray_keys.env; }
+. xray_keys.env
+[[ ! -f sb_keys.env ]] && { su2=$(./sing-box generate uuid); printf 'SB_UUID=%s\n' "$su2" > sb_keys.env; }
+. sb_keys.env
+echo ">>> Configs..."
+cat > config.json <<EJ
+{"log":{"loglevel":"warning"},"inbounds":[{"listen":"127.0.0.1","port":$xp,"protocol":"vless","settings":{"clients":[{"id":"$XRAY_UUID"}],"decryption":"none"},"streamSettings":{"network":"xhttp","xhttpSettings":{"path":"/xray"}}}],"outbounds":[{"protocol":"freedom","tag":"direct"}]}
+EJ
+cat > sb-config.json <<EJ
+{"log":{"level":"warn"},"inbounds":[{"type":"vless","listen":"127.0.0.1","listen_port":$sp,"users":[{"uuid":"$SB_UUID","name":"client"}],"transport":{"type":"ws","path":"/sing940"}}],"outbounds":[{"type":"direct","tag":"direct"}]}
+EJ
+mkdir -p /etc/cloudflared; printf '%s' "$tk" > "/etc/cloudflared/$tn.token"; chmod 600 "/etc/cloudflared/$tn.token"
+echo ">>> systemd..."
+cat > /etc/systemd/system/xray-proxy.service <<EU
 [Unit]
-Description=Xray Proxy (VLESS+XHTTP)
+Description=Xray Proxy
 After=network-online.target
-Wants=network-online.target
-
 [Service]
-Type=simple
-WorkingDirectory=$PROXY_DIR
-ExecStart=$PROXY_DIR/xray run -c $PROXY_DIR/config.json
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-cat > /etc/systemd/system/singbox-proxy.service <<EOF
+Type=simple;WorkingDirectory=$D;ExecStart=$D/xray run -c $D/config.json
+Restart=on-failure;RestartSec=5;LimitNOFILE=65536
+[Install];WantedBy=multi-user.target
+EU
+cat > /etc/systemd/system/singbox-proxy.service <<EU
 [Unit]
-Description=Sing-box Proxy (VLESS+WS)
+Description=Sing-box Proxy
 After=network-online.target
-Wants=network-online.target
-
 [Service]
-Type=simple
-WorkingDirectory=$PROXY_DIR
-ExecStart=$PROXY_DIR/sing-box run -c $PROXY_DIR/sb-config.json
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-cat > /etc/systemd/system/cloudflared-proxy.service <<EOF
+Type=simple;WorkingDirectory=$D;ExecStart=$D/sing-box run -c $D/sb-config.json
+Restart=on-failure;RestartSec=5;LimitNOFILE=65536
+[Install];WantedBy=multi-user.target
+EU
+cat > /etc/systemd/system/cloudflared-proxy.service <<EU
 [Unit]
-Description=Cloudflare Tunnel ($TUNNEL_NAME)
+Description=CF Tunnel
 After=network-online.target xray-proxy.service singbox-proxy.service
-Wants=network-online.target
-
 [Service]
-Type=notify
-ExecStart=/usr/local/bin/cloudflared tunnel --config /etc/cloudflared/config.yml run $TUNNEL_NAME
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# 7. 启用并启动
-systemctl daemon-reload
-systemctl enable --now xray-proxy singbox-proxy cloudflared-proxy
-
+Type=notify;ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate run --token ${tk}
+Restart=on-failure;RestartSec=5;LimitNOFILE=65536
+[Install];WantedBy=multi-user.target
+EU
+systemctl daemon-reload; systemctl enable --now xray-proxy singbox-proxy cloudflared-proxy
+xu="vless://${XRAY_UUID}@${xh}:443?encryption=none&security=tls&sni=${xh}&type=xhttp&host=${xh}&path=%2Fxray&fp=chrome&alpn=h2,http/1.1#${tn}-XRAY"
+su="vless://${SB_UUID}@${sh}:443?encryption=none&security=tls&sni=${sh}&type=ws&host=${sh}&path=%2Fsing940#${tn}-WS"
+cat > clients.txt <<EE
+=== XRAY ===
+$xu
+=== SB ===
+$su
+EE
 echo ""
-echo "✅ 安装完成"
-echo "── Xray (VLESS + XHTTP + TLS) ──"
-echo "  域名: $XRAY_HOST:443"
-echo "  端口: 127.0.0.1:${XRAY_PORT}"
-echo "  UUID: $XRAY_UUID"
-echo "  Path: /xray"
-echo ""
-echo "── Sing-box (VLESS + WebSocket + TLS) ──"
-echo "  域名: $SB_HOST:443"
-echo "  端口: 127.0.0.1:${SB_PORT}"
-echo "  UUID: $SB_UUID"
-echo "  Path: /sing940"
-echo ""
-
-# 生成 v2ray 分享 URL（v2rayN/v2rayNG/Shadowrocket/Clash.Meta 全认）
-# XHTTP+TLS 的关键：security=tls + SNI 必须是真实域名（CF 用 SNI 路由）
-XRAY_URI="vless://${XRAY_UUID}@${XRAY_HOST}:443?encryption=none&security=tls&sni=${XRAY_HOST}&type=xhttp&host=${XRAY_HOST}&path=%2Fxray&fp=chrome&alpn=h2,http/1.1#${TUNNEL_NAME}-XRAY"
-SB_URI="vless://${SB_UUID}@${SB_HOST}:443?encryption=none&security=tls&sni=${SB_HOST}&type=ws&host=${SB_HOST}&path=%2Fsing940#${TUNNEL_NAME}-WS"
-
-cat > $PROXY_DIR/clients.txt <<EOF
-=== XRAY (VLESS+XHTTP+TLS) ===
-$XRAY_URI
-
-=== SING-BOX (VLESS+WS+TLS) ===
-$SB_URI
-EOF
-
-echo "── v2ray 分享地址（复制到客户端导入）──"
-echo "$XRAY_URI"
-echo ""
-echo "$SB_URI"
-echo ""
-echo "  已存 $PROXY_DIR/clients.txt"
-echo ""
-echo "── 服务管理 ──"
-echo "  systemctl status xray-proxy singbox-proxy cloudflared-proxy"
-echo "  bash $PROXY_DIR/scripts/status.sh"
+echo "=== DONE ==="
+echo "Xray: $xh:443  UUID=$XRAY_UUID"; echo "$xu"
+echo "SB:   $sh:443  UUID=$SB_UUID"; echo "$su"
+echo "Uninstall: sudo bash scripts/uninstall.sh --tok TOKEN --tid $ti --aid $ai"
