@@ -1,0 +1,27 @@
+# Binaries (downloaded at install time)
+xray
+xray.zip
+sing-box
+sing-box-*/
+cloudflared
+
+# Runtime configs with secrets
+config.json
+sb-config.json
+xray_keys.env
+sb_keys.env
+clients.txt
+
+# TLS
+*.crt
+*.key
+*.pem
+
+# Archives
+*.tar.gz
+*.zip
+
+# Backup / temp
+*.bak
+*.tmp
+.env.bak
