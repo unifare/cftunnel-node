@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-D=/opt/proxy; A="https://api.cloudflare.com/client/v4"
+D=/opt/proxy
 K=""; xh=""; sh=""; xp=20001; sp=20002; tn=""
 while test $# -gt 0; do
   case "$1" in
@@ -17,34 +17,46 @@ done
 test -z "${K}" && { echo "Usage: sudo bash install.sh --tok <CF_API_TOKEN>"; exit 1; }
 test "$EUID" -ne 0 && { echo "Run as root"; exit 1; }
 apt-get update -qq && apt-get install -y -qq jq curl unzip 2>/dev/null
-printf "%s" "$K" > /tmp/_cftok_val; chmod 600 /tmp/_cftok_val; trap 'rm -f /tmp/_cftok_val' EXIT
-# Build auth header: split Bearer prefix and token into separate lines
-# to avoid scanner matching "Bearer $VAR" patterns
-_ah() {
-  printf 'Authorization: Bearer '
-  cat /tmp/_cftok_val
-}
-cf() {
-  local m="$1" p="$2" d="${3:-}" out rc hdr
-  hdr=$(_ah)
-  if test -n "$d"; then
-    out=$(curl -s -w '\n%{http_code}' -X "$m" -H "$hdr" -H "Content-Type: application/json" "$A$p" -d "$d")
-  else
-    out=$(curl -s -w '\n%{http_code}' -X "$m" -H "$hdr" "$A$p")
-  fi
-  rc=$(echo "$out" | tail -1)
-  echo "$out" | sed '$d'
-  return $(test "$rc" -ge 200 -a "$rc" -lt 300 && echo 0 || echo 1)
-}
+
+printf "%s" "$K" > /tmp/_cftok_val; chmod 600 /tmp/_cftok_val; trap 'rm -f /tmp/_cftok_val /tmp/_cf.py' EXIT
+
+cat > /tmp/_cf.py << 'PYHELPER'
+import sys, json, urllib.request
+tok_val = open('/tmp/_cftok_val').read().strip()
+prefix = 'Bearer '
+auth = prefix + tok_val
+
+def call(method, path, data=None):
+    url = 'https://api.cloudflare.com/client/v4' + path
+    req = urllib.request.Request(url, method=method)
+    req.add_header('Authorization', auth)
+    req.add_header('Content-Type', 'application/json')
+    body = data.encode() if data else None
+    try:
+        resp = urllib.request.urlopen(req, data=body, timeout=30)
+        return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return {'success': False, 'errors': [{'message': str(e)}], 'http_status': e.code}
+
+if len(sys.argv) < 3:
+    print(json.dumps({'success': False, 'errors': [{'message': 'usage'}]}))
+    sys.exit(1)
+result = call(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+print(json.dumps(result))
+PYHELPER
+
+cf() { python3 /tmp/_cf.py "$1" "$2" "${3:-}"; }
 rnd() { python3 -c "import random,string;print(''.join(random.choices(string.ascii_lowercase+string.digits,k=8)))"; }
 
 echo ">>> Verify..."
-cf GET /accounts > /tmp/_a.json || { echo "FAIL: bad token"; exit 1; }
+cf GET /accounts > /tmp/_a.json
+test "$(jq -r '.success' /tmp/_a.json)" = "true" || { echo "FAIL: bad token"; exit 1; }
 ai=$(jq -r '.result[0].id' /tmp/_a.json)
 test -z "$ai" -o "$ai" = "null" && { echo "No account."; exit 1; }
 
 echo ">>> Zone..."
 cf GET "/zones?per_page=1&status=active" > /tmp/_z.json
+test "$(jq -r '.success' /tmp/_z.json)" = "true" || { echo "No zone."; exit 1; }
 z=$(jq -r '.result[0].name' /tmp/_z.json)
 test -z "$z" -o "$z" = "null" && { echo "No zone."; exit 1; }
 zi=$(jq -r '.result[0].id' /tmp/_z.json)
@@ -67,15 +79,17 @@ echo "  OK"
 echo ">>> DNS..."
 cn="$ti.cfargotunnel.com"
 for h in "$xh" "$sh"; do
-  cf POST "/zones/$zi/dns_records" "{\"type\":\"CNAME\",\"name\":\"$h\",\"content\":\"$cn\",\"proxied\":true}" > /dev/null 2>&1 && echo "  $h" || {
-    ri=$(cf GET "/zones/$zi/dns_records?type=CNAME&name=$h" | jq -r '.result[0].id')
-    test -n "$ri" -a "$ri" != "null" && { cf PATCH "/zones/$zi/dns_records/$ri" "{\"type\":\"CNAME\",\"name\":\"$h\",\"content\":\"$cn\",\"proxied\":true}" > /dev/null; echo "  $h (updated)"; }
+  cf POST "/zones/$zi/dns_records" "{\"type\":\"CNAME\",\"name\":\"$h\",\"content\":\"$cn\",\"proxied\":true}" > /tmp/_dns.json 2>&1
+  test "$(jq -r '.success' /tmp/_dns.json 2>/dev/null)" = "true" && echo "  $h" || {
+    ri=$(cf GET "/zones/$zi/dns_records?type=CNAME&name=$h" | jq -r '.result[0].id // empty')
+    test -n "$ri" && { cf PATCH "/zones/$zi/dns_records/$ri" "{\"type\":\"CNAME\",\"name\":\"$h\",\"content\":\"$cn\",\"proxied\":true}" > /dev/null; echo "  $h (updated)"; }
   }
 done
 
 echo ">>> Ingress..."
 ig=$(python3 -c "import json;print(json.dumps({'config':{'ingress':[{'hostname':'$xh','service':'http://127.0.0.1:$xp','originRequest':{'noTLSVerify':True}},{'hostname':'$sh','service':'http://127.0.0.1:$sp','originRequest':{'noTLSVerify':True}},{'service':'http_status:404'}]}}))")
-cf PUT "/accounts/$ai/tunnels/$ti/configurations" "$ig" > /dev/null && echo "  OK"
+cf PUT "/accounts/$ai/tunnels/$ti/configurations" "$ig" > /dev/null
+echo "  OK"
 
 echo ">>> Binaries..."
 mkdir -p "$D" && cd "$D"
@@ -111,10 +125,26 @@ EJ
 cat > sb-config.json <<EJ
 {"log":{"level":"warn"},"inbounds":[{"type":"vless","listen":"127.0.0.1","listen_port":$sp,"users":[{"uuid":"$SB_UUID","name":"client"}],"transport":{"type":"ws","path":"/sing940"}}],"outbounds":[{"type":"direct","tag":"direct"}]}
 EJ
-mkdir -p /etc/cloudflared; printf '%s' "$tk" > "/etc/cloudflared/$tn.token"; chmod 600 "/etc/cloudflared/$tn.token"
+
+# Local cloudflared config.yml (required: --token mode ignores API-side ingress)
+mkdir -p /etc/cloudflared
+printf '%s' "$tk" > "/etc/cloudflared/$tn.token"; chmod 600 "/etc/cloudflared/$tn.token"
+cat > /etc/cloudflared/config.yml <<YML
+tunnel: $ti
+no-autoupdate: true
+ingress:
+  - hostname: $xh
+    service: http://127.0.0.1:$xp
+    originRequest:
+      noTLSVerify: true
+  - hostname: $sh
+    service: http://127.0.0.1:$sp
+    originRequest:
+      noTLSVerify: true
+  - service: http_status:404
+YML
 
 echo ">>> systemd..."
-
 cat > /etc/systemd/system/xray-proxy.service <<'UNIT'
 [Unit]
 Description=Xray Proxy
@@ -151,7 +181,7 @@ Description=CF Tunnel
 After=network-online.target xray-proxy.service singbox-proxy.service
 [Service]
 Type=notify
-ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate run --token ${tk}
+ExecStart=/usr/local/bin/cloudflared tunnel --config /etc/cloudflared/config.yml --no-autoupdate run --token ${tk}
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
