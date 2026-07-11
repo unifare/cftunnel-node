@@ -159,15 +159,23 @@ fi
 test -x /usr/local/bin/cloudflared || { echo -n "  cloudflared..."; curl -fsSLo /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64; chmod +x /usr/local/bin/cloudflared; echo " OK"; }
 
 echo ">>> Keys..."
-# Generate all keys if not exists
-test -f sb_keys.env || {
-  xu=$(./sing-box generate uuid)           # VLESS XHTTP
-  su=$(./sing-box generate uuid)           # VLESS WS
-  ru=$(./sing-box generate uuid)           # Reality VLESS
-  hy_pass=$(./sing-box generate rand 32 --hex 2>/dev/null || python3 -c "import secrets;print(secrets.token_hex(32))")  # HY2
-  tu_pass=$(./sing-box generate rand 32 --hex 2>/dev/null || python3 -c "import secrets;print(secrets.token_hex(32))")  # TUIC
+# Regenerate if missing or incomplete (need all 8 keys for v3)
+_need_gen=0
+test -f sb_keys.env || _need_gen=1
+if test $_need_gen -eq 0; then
+  . sb_keys.env
+  for v in XRAY_UUID WS_UUID REALITY_UUID HY2_PASS TUIC_PASS TUIC_UUID REALITY_PUBKEY REALITY_PRIVKEY; do
+    test -n "${!v:-}" || { _need_gen=1; break; }
+  done
+fi
+if test $_need_gen -eq 1; then
+  echo -n "  generating..."
+  xu=$(./sing-box generate uuid)
+  su=$(./sing-box generate uuid)
+  ru=$(./sing-box generate uuid)
+  hy_pass=$(python3 -c "import secrets;print(secrets.token_hex(32))")
+  tu_pass=$(python3 -c "import secrets;print(secrets.token_hex(32))")
   tu_uuid=$(./sing-box generate uuid)
-  # Reality keypair
   rkp=$(./sing-box generate reality-keypair 2>/dev/null || echo "")
   if test -n "$rkp"; then
     rpk=$(echo "$rkp" | grep "PublicKey" | awk '{print $2}')
@@ -186,8 +194,9 @@ TUIC_UUID=$tu_uuid
 REALITY_PUBKEY=$rpk
 REALITY_PRIVKEY=$rsk
 KEYS
-}
-. sb_keys.env
+  . sb_keys.env
+  echo " done"
+fi
 
 echo ">>> sing-box config..."
 # Write sing-box config with all 5 protocols
