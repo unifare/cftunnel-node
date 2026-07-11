@@ -17,7 +17,46 @@ while test $# -gt 0; do
   esac
   shift
 done
-test -z "${K}" && { echo "Usage: sudo bash install.sh --tok <CF_API_TOKEN>"; exit 1; }
+test -z "${K}" && {
+  # No token: show current deployment status if exists
+  if test -f "$D/.state"; then
+    . "$D/.state"
+    . "$D/sb_keys.env" 2>/dev/null || true
+    echo "=== Current Deployment ==="
+    echo "  Zone:     $zone_name"
+    echo "  Tunnel:   $tunnel_name ($tunnel_id)"
+    echo "  IP:       ${public_ip:-unknown}"
+    echo ""
+    echo "  Tunnel hosts:"
+    echo "    XHTTP:  $(echo $hosts | cut -d, -f1):443"
+    echo "    WS:     $(echo $hosts | cut -d, -f2):443"
+    echo ""
+    echo "  Direct ports:"
+    echo "    HY2:     ${public_ip:-IP}:8443"
+    echo "    TUIC:    ${public_ip:-IP}:8444"
+    echo "    Reality: ${public_ip:-IP}:8445"
+    echo ""
+    if test -f "$D/clients.txt"; then
+      echo "=== Client Links ==="
+      cat "$D/clients.txt"
+    fi
+    echo ""
+    echo "=== Commands ==="
+    echo "  Update:  sudo bash $0 --tok <TOKEN>"
+    echo "  Rebuild: sudo bash $0 --tok <TOKEN> --fresh"
+    echo "  Uninstall: sudo bash $D/scripts/uninstall.sh"
+    if test -n "${public_ip:-}"; then
+      echo ""
+      echo "=== Subscription ==="
+      echo "  v2ray:  http://${public_ip}:9091/sub"
+      echo "  clash:  http://${public_ip}:9091/clash"
+    fi
+    exit 0
+  fi
+  echo "Usage: sudo bash install.sh --tok <CF_API_TOKEN>"
+  echo "       sudo bash install.sh            (show status)"
+  exit 1
+}
 test "$EUID" -ne 0 && { echo "Run as root"; exit 1; }
 apt-get update -qq && apt-get install -y -qq jq curl unzip 2>/dev/null
 
