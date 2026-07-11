@@ -299,8 +299,7 @@ cat > sb-config.json <<EOF
           "private_key": "$REALITY_PRIVKEY",
           "short_id": ["$(openssl rand -hex 8 2>/dev/null || python3 -c 'import secrets;print(secrets.token_hex(8))')"]
         }
-      },
-      "transport": {"type": "httpupgrade"}
+      }
     }
   ],
   "outbounds": [{"type": "direct", "tag": "direct"}]
@@ -412,7 +411,7 @@ echo ""
 echo "--- Tunnel protocols (CF Tunnel, hidden IP) ---"
 echo ""
 
-xh_uri="vless://${XRAY_UUID}@${xh}:443?encryption=none&security=tls&sni=${xh}&type=httpupgrade&host=${xh}&path=%2Fxray&fp=chrome#${tn}-XHTTP"
+xh_uri="vless://${XRAY_UUID}@${xh}:443?encryption=none&security=tls&sni=${xh}&type=xhttp&host=${xh}&path=%2Fxray&fp=chrome#${tn}-XHTTP"
 sh_uri="vless://${WS_UUID}@${sh}:443?encryption=none&security=tls&sni=${sh}&type=ws&host=${sh}&path=%2Fsing940#${tn}-WS"
 
 echo "VLESS+XHTTP:"
@@ -426,9 +425,9 @@ echo ""
 echo "--- Direct protocols (VPS IP: $PUBLIC_IP) ---"
 echo ""
 
-hy_uri="hysteria2://${HY2_PASS}@${PUBLIC_IP}:${hp}?sni=${xh}#${tn}-HY2"
+hy_uri="hysteria2://${HY2_PASS}@${PUBLIC_IP}:${hp}?sni=${xh}&alpn=h3&insecure=0#${tn}-HY2"
 tu_uri="tuic://${TUIC_UUID}:${TUIC_PASS}@${PUBLIC_IP}:${tp}?congestion_control=bbr&alpn=h3&sni=${xh}#${tn}-TUIC"
-re_uri="vless://${REALITY_UUID}@${PUBLIC_IP}:${rp}?encryption=none&security=reality&sni=${REALITY_SNI}&fp=chrome&type=httpupgrade&pbk=${REALITY_PUBKEY}#${tn}-REALITY"
+re_uri="vless://${REALITY_UUID}@${PUBLIC_IP}:${rp}?encryption=none&security=reality&sni=${REALITY_SNI}&fp=chrome&type=tcp&flow=xtls-rprx-vision&pbk=${REALITY_PUBKEY}#${tn}-REALITY"
 
 echo "Hysteria2:"
 echo "  $hy_uri"
@@ -499,7 +498,8 @@ proxies:
       short-id: ""
     servername: ${REALITY_SNI}
     client-fingerprint: chrome
-    network: httpupgrade
+    network: tcp
+    flow: xtls-rprx-vision
 
 proxy-groups:
   - name: "Auto"
@@ -541,7 +541,7 @@ for url in ['https://raw.githubusercontent.com/ip-scanner/cloudflare/main/ip.txt
 " 2>/dev/null || echo "")
 vip_ip="$vip_result"
 test -n "$vip_ip" && {
-  vip_xh="vless://${XRAY_UUID}@${vip_ip}:443?encryption=none&security=tls&sni=${xh}&type=httpupgrade&host=${xh}&path=%2Fxray&fp=chrome#${tn}-XHTTP-VIP"
+  vip_xh="vless://${XRAY_UUID}@${vip_ip}:443?encryption=none&security=tls&sni=${xh}&type=xhttp&host=${xh}&path=%2Fxray&fp=chrome#${tn}-XHTTP-VIP"
   vip_sh="vless://${WS_UUID}@${vip_ip}:443?encryption=none&security=tls&sni=${sh}&type=ws&host=${sh}&path=%2Fsing940#${tn}-WS-VIP"
 }
 
