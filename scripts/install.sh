@@ -307,12 +307,30 @@ cat > sb-config.json <<EOF
 }
 EOF
 
-# Generate self-signed cert for HY2/TUIC (they need TLS cert)
-if test ! -f "$D/fullchain.pem"; then
-  openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-    -keyout "$D/privkey.pem" -out "$D/fullchain.pem" \
-    -subj "/CN=$REALITY_SNI" 2>/dev/null
-fi
+# ── TLS Certificate (acme.sh via CF DNS, fallback to self-signed) ──
+echo ">>> Certificate..."
+CERT_DOMAIN="${xh}"   # Use tunnel hostname for cert
+NEED_CERT=0
+test -f "$D/fullchain.pem" -a -f "$D/privkey.pem" || NEED_CERT=1
+test $NEED_CERT -eq 1 && {
+  echo -n "  issuing for $CERT_DOMAIN..."
+  if test ! -x /root/.acme.sh/acme.sh; then
+    curl -fsSL https://get.acme.sh | sh -s email=admin@${z} > /dev/null 2>&1
+    /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt > /dev/null 2>&1
+  fi
+  export CF_Token="$K"
+  if /root/.acme.sh/acme.sh --issue --dns dns_cf -d "$CERT_DOMAIN" \
+    --keylength ec-256 --force > /tmp/_acme.log 2>&1; then
+    /root/.acme.sh/acme.sh --install-cert -d "$CERT_DOMAIN" \
+      --fullchain-file "$D/fullchain.pem" --key-file "$D/privkey.pem" > /dev/null 2>&1
+    echo " OK (Let's Encrypt)"
+  else
+    echo " fallback self-signed"
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+      -keyout "$D/privkey.pem" -out "$D/fullchain.pem" \
+      -subj "/CN=$CERT_DOMAIN" 2>/dev/null
+  fi
+}
 
 echo ">>> Cloudflared..."
 mkdir -p /etc/cloudflared
@@ -408,8 +426,8 @@ echo ""
 echo "--- Direct protocols (VPS IP: $PUBLIC_IP) ---"
 echo ""
 
-hy_uri="hysteria2://${HY2_PASS}@${PUBLIC_IP}:${hp}?insecure=1&sni=${REALITY_SNI}#${tn}-HY2"
-tu_uri="tuic://${TUIC_UUID}:${TUIC_PASS}@${PUBLIC_IP}:${tp}?congestion_control=bbr&alpn=h3&sni=${REALITY_SNI}&allow_insecure=1#${tn}-TUIC"
+hy_uri="hysteria2://${HY2_PASS}@${PUBLIC_IP}:${hp}?sni=${xh}#${tn}-HY2"
+tu_uri="tuic://${TUIC_UUID}:${TUIC_PASS}@${PUBLIC_IP}:${tp}?congestion_control=bbr&alpn=h3&sni=${xh}#${tn}-TUIC"
 re_uri="vless://${REALITY_UUID}@${PUBLIC_IP}:${rp}?encryption=none&security=reality&sni=${REALITY_SNI}&fp=chrome&type=httpupgrade&pbk=${REALITY_PUBKEY}#${tn}-REALITY"
 
 echo "Hysteria2:"
@@ -461,17 +479,15 @@ proxies:
     server: ${PUBLIC_IP}
     port: ${hp}
     password: ${HY2_PASS}
-    sni: ${REALITY_SNI}
-    skip-cert-verify: true
+    sni: ${xh}
   - name: "${tn}-TUIC"
     type: tuic
     server: ${PUBLIC_IP}
     port: ${tp}
     uuid: ${TUIC_UUID}
     password: ${TUIC_PASS}
-    sni: ${REALITY_SNI}
+    sni: ${xh}
     alpn: ["h3"]
-    skip-cert-verify: true
   - name: "${tn}-Reality"
     type: vless
     server: ${PUBLIC_IP}
