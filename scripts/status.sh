@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
-# 查看三服务状态和最新日志
+# Show proxy deployment status
 set -e
-echo "=== 服务状态 ==="
-for svc in xray-proxy singbox-proxy cloudflared-proxy; do
-  status=$(systemctl is-active $svc 2>/dev/null || echo "inactive")
-  printf "  %-22s %s\n" "$svc" "$status"
+
+D=/opt/proxy
+echo "=== Services ==="
+for s in singbox-proxy cloudflared-proxy; do
+  status=$(systemctl is-active $s 2>/dev/null || echo "inactive")
+  printf "  %-22s %s\n" "$s" "$status"
 done
+
 echo ""
-echo "=== 端口监听 ==="
-ss -lntup 2>/dev/null | grep -E ':(20001|20002)' || echo "  (无)"
+echo "=== Ports ==="
+ss -lntp 2>/dev/null | grep -E ':(20001|20002)' | awk '{print "  "$4" -> "$6}' || echo "  (none)"
+
 echo ""
-echo "=== 最近 20 行日志 ==="
-for svc in xray-proxy singbox-proxy cloudflared-proxy; do
-  echo "--- $svc ---"
-  journalctl -u $svc -n 20 --no-pager 2>/dev/null || echo "  (无日志)"
-done
+if test -f "$D/.state"; then
+  . "$D/.state"
+  echo "=== Deployment ==="
+  echo "  Zone:     $zone_name"
+  echo "  Tunnel:   $tunnel_name"
+  echo ""
+  test -f "$D/clients.txt" && cat "$D/clients.txt"
+fi
