@@ -48,8 +48,8 @@ test -z "${K}" && {
     if test -n "${public_ip:-}"; then
       echo ""
       echo "=== Subscription ==="
-      echo "  v2ray:  http://${public_ip}:9091/sub"
-      echo "  clash:  http://${public_ip}:9091/clash"
+      echo "  v2ray:  https://${public_ip}:9091/sub"
+      echo "  clash:  https://${public_ip}:9091/clash"
     fi
     exit 0
   fi
@@ -557,8 +557,8 @@ TUIC:    $tu_uri
 Reality: $re_uri
 
 === Subscription ===
-v2ray:  http://${PUBLIC_IP}:9091/sub
-clash:  http://${PUBLIC_IP}:9091/clash
+v2ray:  https://${PUBLIC_IP}:9091/sub
+clash:  https://${PUBLIC_IP}:9091/clash
 CEOF
 
 echo ""
@@ -585,8 +585,8 @@ echo ""
 echo " $re_uri"
 echo ""
 echo "--- Subscription ---"
-echo " v2ray:  http://${PUBLIC_IP}:9091/sub"
-echo " clash:  http://${PUBLIC_IP}:9091/clash"
+echo " v2ray:  https://${PUBLIC_IP}:9091/sub"
+echo " clash:  https://${PUBLIC_IP}:9091/clash"
 echo ""
 echo "=============================================="
 echo " uninstall: sudo bash $D/scripts/uninstall.sh"
