@@ -425,8 +425,8 @@ echo ""
 echo "--- Direct protocols (VPS IP: $PUBLIC_IP) ---"
 echo ""
 
-hy_uri="hysteria2://${HY2_PASS}@${PUBLIC_IP}:${hp}?sni=${xh}&alpn=h3&insecure=0#${tn}-HY2"
-tu_uri="tuic://${TUIC_UUID}:${TUIC_PASS}@${PUBLIC_IP}:${tp}?congestion_control=bbr&alpn=h3&sni=${xh}#${tn}-TUIC"
+hy_uri="hysteria2://${HY2_PASS}@${PUBLIC_IP}:${hp}?insecure=1&sni=${REALITY_SNI}#${tn}-HY2"
+tu_uri="tuic://${TUIC_UUID}:${TUIC_PASS}@${PUBLIC_IP}:${tp}?congestion_control=bbr&alpn=h3&sni=${REALITY_SNI}&allow_insecure=1#${tn}-TUIC"
 re_uri="vless://${REALITY_UUID}@${PUBLIC_IP}:${rp}?encryption=none&security=reality&sni=${REALITY_SNI}&fp=chrome&type=tcp&flow=xtls-rprx-vision&pbk=${REALITY_PUBKEY}#${tn}-REALITY"
 
 echo "Hysteria2:"
@@ -478,14 +478,16 @@ proxies:
     server: ${PUBLIC_IP}
     port: ${hp}
     password: ${HY2_PASS}
-    sni: ${xh}
+    sni: ${REALITY_SNI}
+    skip-cert-verify: true
   - name: "${tn}-TUIC"
     type: tuic
     server: ${PUBLIC_IP}
     port: ${tp}
     uuid: ${TUIC_UUID}
     password: ${TUIC_PASS}
-    sni: ${xh}
+    sni: ${REALITY_SNI}
+    skip-cert-verify: true
     alpn: ["h3"]
   - name: "${tn}-Reality"
     type: vless
