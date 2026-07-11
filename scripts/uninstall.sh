@@ -5,11 +5,8 @@ D=/opt/proxy
 
 ti=""; ai=""; zi=""; hosts=""; tn=""
 if test -f "$D/.state"; then
-  ti=$(grep '^tunnel_id=' "$D/.state" | cut -d= -f2)
-  ai=$(grep '^account_id=' "$D/.state" | cut -d= -f2)
-  zi=$(grep '^zone_id=' "$D/.state" | cut -d= -f2)
-  hosts=$(grep '^hosts=' "$D/.state" | cut -d= -f2)
-  tn=$(grep '^tunnel_name=' "$D/.state" | cut -d= -f2)
+  . "$D/.state"
+  hosts="$host1,$host2,$host3,$host4"
 fi
 
 echo "Stopping..."
