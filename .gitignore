@@ -26,3 +26,4 @@ clients.txt
 *.tmp
 .env.bak
 .state
+sub/
