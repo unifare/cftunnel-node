@@ -66,6 +66,25 @@ test -z "$sh" && sh="${pf}-ws.${z}"
 test -z "$tn" && tn="vps-${pf}"
 echo "  $z  ->  $xh / $sh"
 
+# Check for existing deployment and clean up if found
+if test -f "$D/.state"; then
+  echo ">>> Found previous deployment, cleaning up..."
+  old_ti=$(grep '^tunnel_id=' "$D/.state" 2>/dev/null | cut -d= -f2)
+  old_ai=$(grep '^account_id=' "$D/.state" 2>/dev/null | cut -d= -f2)
+  old_zi=$(grep '^zone_id=' "$D/.state" 2>/dev/null | cut -d= -f2)
+  if test -n "$old_ti" -a -n "$old_ai"; then
+    # Delete old DNS records
+    for h in $(grep '^hosts=' "$D/.state" 2>/dev/null | cut -d= -f2 | tr ',' ' '); do
+      rid=$(cf GET "/zones/${old_zi:-$zi}/dns_records?type=CNAME&name=$h" | jq -r '.result[0].id // empty')
+      test -n "$rid" && cf DELETE "/zones/${old_zi:-$zi}/dns_records/$rid" > /dev/null && echo "  DNS: $h deleted"
+    done
+    # Delete old tunnel
+    cf DELETE "/accounts/$old_ai/tunnels/$old_ti" > /dev/null && echo "  Tunnel: $old_ti deleted"
+  fi
+  systemctl stop xray-proxy singbox-proxy cloudflared-proxy 2>/dev/null || true
+  rm -f "$D/.state"
+fi
+
 echo ">>> Tunnel..."
 ts=$(python3 -c "import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())")
 cf POST "/accounts/$ai/tunnels" "{\"name\":\"$tn\",\"tunnel_secret\":\"$ts\",\"config_src\":\"cloudflare\"}" > /tmp/_t.json
@@ -79,8 +98,8 @@ echo "  OK"
 echo ">>> DNS..."
 cn="$ti.cfargotunnel.com"
 for h in "$xh" "$sh"; do
-  cf POST "/zones/$zi/dns_records" "{\"type\":\"CNAME\",\"name\":\"$h\",\"content\":\"$cn\",\"proxied\":true}" > /tmp/_dns.json 2>&1
-  test "$(jq -r '.success' /tmp/_dns.json 2>/dev/null)" = "true" && echo "  $h" || {
+  cf POST "/zones/$zi/dns_records" "{\"type\":\"CNAME\",\"name\":\"$h\",\"content\":\"$cn\",\"proxied\":true}" > /tmp/_dns.json
+  test "$(jq -r '.success' /tmp/_dns.json)" = "true" && echo "  $h" || {
     ri=$(cf GET "/zones/$zi/dns_records?type=CNAME&name=$h" | jq -r '.result[0].id // empty')
     test -n "$ri" && { cf PATCH "/zones/$zi/dns_records/$ri" "{\"type\":\"CNAME\",\"name\":\"$h\",\"content\":\"$cn\",\"proxied\":true}" > /dev/null; echo "  $h (updated)"; }
   }
@@ -126,7 +145,17 @@ cat > sb-config.json <<EJ
 {"log":{"level":"warn"},"inbounds":[{"type":"vless","listen":"127.0.0.1","listen_port":$sp,"users":[{"uuid":"$SB_UUID","name":"client"}],"transport":{"type":"ws","path":"/sing940"}}],"outbounds":[{"type":"direct","tag":"direct"}]}
 EJ
 
-# Local cloudflared config.yml (required: --token mode ignores API-side ingress)
+# Save state for uninstall
+cat > "$D/.state" <<STATE
+tunnel_id=$ti
+tunnel_name=$tn
+account_id=$ai
+zone_id=$zi
+zone_name=$z
+hosts=$xh,$sh
+created=$(date -Iseconds)
+STATE
+
 mkdir -p /etc/cloudflared
 printf '%s' "$tk" > "/etc/cloudflared/$tn.token"; chmod 600 "/etc/cloudflared/$tn.token"
 cat > /etc/cloudflared/config.yml <<YML
@@ -150,14 +179,10 @@ cat > /etc/systemd/system/xray-proxy.service <<'UNIT'
 Description=Xray Proxy
 After=network-online.target
 [Service]
-Type=simple
-WorkingDirectory=/opt/proxy
+Type=simple;WorkingDirectory=/opt/proxy
 ExecStart=/opt/proxy/xray run -c /opt/proxy/config.json
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65536
-[Install]
-WantedBy=multi-user.target
+Restart=on-failure;RestartSec=5;LimitNOFILE=65536
+[Install];WantedBy=multi-user.target
 UNIT
 
 cat > /etc/systemd/system/singbox-proxy.service <<'UNIT'
@@ -165,14 +190,10 @@ cat > /etc/systemd/system/singbox-proxy.service <<'UNIT'
 Description=Sing-box Proxy
 After=network-online.target
 [Service]
-Type=simple
-WorkingDirectory=/opt/proxy
+Type=simple;WorkingDirectory=/opt/proxy
 ExecStart=/opt/proxy/sing-box run -c /opt/proxy/sb-config.json
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65536
-[Install]
-WantedBy=multi-user.target
+Restart=on-failure;RestartSec=5;LimitNOFILE=65536
+[Install];WantedBy=multi-user.target
 UNIT
 
 cat > /etc/systemd/system/cloudflared-proxy.service <<UNIT
@@ -182,11 +203,8 @@ After=network-online.target xray-proxy.service singbox-proxy.service
 [Service]
 Type=notify
 ExecStart=/usr/local/bin/cloudflared tunnel --config /etc/cloudflared/config.yml --no-autoupdate run --token ${tk}
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65536
-[Install]
-WantedBy=multi-user.target
+Restart=on-failure;RestartSec=5;LimitNOFILE=65536
+[Install];WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
@@ -212,4 +230,4 @@ echo ""
 echo " $sh:443"
 echo " $su"
 echo "=============================================="
-echo " uninstall: sudo bash $D/scripts/uninstall.sh --tok <T> --tid $ti --aid $ai"
+echo " uninstall: sudo bash $D/scripts/uninstall.sh"
