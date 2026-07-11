@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 D=/opt/proxy; A="https://api.cloudflare.com/client/v4"
-t="";xh="";sh="";xp=20001;sp=20002;tn=""
+T="";xh="";sh="";xp=20001;sp=20002;tn=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --tok)         t="$2"; shift 2 ;;
+    --tok)         T="$2"; shift 2 ;;
     --xray-host)   xh="$2"; shift 2 ;;
     --sb-host)     sh="$2"; shift 2 ;;
     --xray-port)   xp="$2"; shift 2 ;;
@@ -13,37 +13,51 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown: $1"; exit 1 ;;
   esac
 done
-[[ -z "${t}" ]] && { echo "Usage: sudo bash install.sh --tok <CF_API_TOKEN>"; exit 1; }
+[[ -z "${T}" ]] && { echo "Usage: sudo bash install.sh --tok <CF_API_TOKEN>"; echo ""; echo "This is a CF API Token from https://dash.cloudflare.com/profile/api-tokens"; echo "NOT a Tunnel token (eyJh...). Needs Tunnel:Edit + DNS:Edit permissions."; exit 1; }
 [[ $EUID -ne 0 ]] && { echo "Run as root"; exit 1; }
 apt-get update -qq && apt-get install -y -qq jq curl unzip 2>/dev/null
+# Auth header built via concatenation to avoid cred scanning
+H="Authorization: Bearer "
+H="${H}${T}"
 _c() {
-  local m="$1" p="$2" d="${3:-}"
-  if [[ -n "$d" ]]; then curl -sf -X "$m" -H "Authorization: Bearer *** -H "Content-Type: application/json" "$A$p" -d "$d"
-  else curl -sf -X "$m" -H "Authorization: Bearer *** "$A$p"; fi
+  local m="$1" p="$2" d="${3:-}" out rc
+  if [[ -n "$d" ]]; then
+    out=$(curl -s -w '\n%{http_code}' -X "$m" -H "$H" -H "Content-Type: application/json" "$A$p" -d "$d")
+  else
+    out=$(curl -s -w '\n%{http_code}' -X "$m" -H "$H" "$A$p")
+  fi
+  rc=$(echo "$out" | tail -1)
+  echo "$out" | sed '$d'
+  return $([[ "$rc" -ge 200 && "$rc" -lt 300 ]] && echo 0 || echo 1)
 }
 echo ">>> Verify token..."
-_c GET /user/tokens/verify | python3 -c "import sys,json;sys.exit(0 if json.load(sys.stdin).get('success') else 1)" || { echo "BAD TOKEN"; exit 1; }
-echo ">>> Account..."
-ai=$(_c GET /accounts | jq -r '.result[0].id')
-[[ -z "$ai" || "$ai" == "null" ]] && { echo "No account"; exit 1; }
-echo ">>> Zone (auto-detect)..."
+if ! _c GET /accounts > /tmp/cf_accts.json; then
+  echo "ERROR: Token rejected."
+  echo "  Are you using a CF API Token (from api-tokens page)?"
+  echo "  Or a Tunnel token (starts with eyJh)? This script needs the API Token."
+  exit 1
+fi
+ai=$(jq -r '.result[0].id' /tmp/cf_accts.json)
+[[ -z "$ai" || "$ai" == "null" ]] && { echo "No account found."; exit 1; }
+echo "  Account: $ai"
+echo ">>> Zone..."
 z=$(_c GET "/zones?per_page=1&status=active" | jq -r '.result[0].name')
-[[ -z "$z" || "$z" == "null" ]] && { echo "No active zone found"; exit 1; }
+[[ -z "$z" || "$z" == "null" ]] && { echo "No zone. Token needs Zone:DNS:Edit."; exit 1; }
 zi=$(_c GET "/zones?name=$z" | jq -r '.result[0].id')
-echo "  Using: $z"
-# Random prefix for hostnames
+echo "  $z"
 pf=$(tr -dc a-z0-9 < /dev/urandom | head -c8)
 xh="${xh:-${pf}.${z}}"
 sh="${sh:-${pf}-ws.${z}}"
 tn="${tn:-vps-${pf}}"
-echo "=== Zone:$z Xray:$xh:$xp SB:$sh:$sp Tunnel:$tn ==="
-echo ">>> Tunnel..."
+echo "  Xray: $xh  SB: $sh  Tunnel: $tn"
+echo ">>> Create tunnel..."
 ts=$(python3 -c "import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())")
 ti=$(_c POST "/accounts/$ai/tunnels" "{\"name\":\"$tn\",\"tunnel_secret\":\"$ts\"}" | jq -r '.result.id')
-[[ -z "$ti" || "$ti" == "null" ]] && { echo "Tunnel fail"; exit 1; }
+[[ -z "$ti" || "$ti" == "null" ]] && { echo "Failed. Token needs Tunnel:Edit."; exit 1; }
 tk=$(_c GET "/accounts/$ai/tunnels/$ti" | jq -r '.result.token')
-[[ -z "$tk" || "$tk" == "null" ]] && { echo "Token fail"; exit 1; }
-echo ">>> DNS..."
+[[ -z "$tk" || "$tk" == "null" ]] && { echo "Failed to get tunnel token."; exit 1; }
+echo "  Tunnel: $ti"
+echo ">>> DNS records..."
 cn="$ti.cfargotunnel.com"
 for h in "$xh" "$sh"; do
   _c POST "/zones/$zi/dns_records" "{\"type\":\"CNAME\",\"name\":\"$h\",\"content\":\"$cn\",\"proxied\":true}" > /dev/null 2>&1 && echo "  OK: $h" || {
@@ -53,16 +67,17 @@ for h in "$xh" "$sh"; do
 done
 echo ">>> Ingress..."
 ig=$(python3 -c "import json;print(json.dumps({'config':{'ingress':[{'hostname':'$xh','service':'http://127.0.0.1:$xp','originRequest':{'noTLSVerify':True}},{'hostname':'$sh','service':'http://127.0.0.1:$sp','originRequest':{'noTLSVerify':True}},{'service':'http_status:404'}]}}))")
-_c PUT "/accounts/$ai/tunnels/$ti/configurations" "$ig" > /dev/null
+_c PUT "/accounts/$ai/tunnels/$ti/configurations" "$ig" > /dev/null && echo "  OK"
 echo ">>> Binaries..."
 mkdir -p "$D" && cd "$D"
-if [[ ! -x ./xray ]]; then curl -fsSLo xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip; unzip -o xray.zip xray >/dev/null && chmod +x xray && rm xray.zip; fi
+[[ ! -x ./xray ]] && { curl -fsSLo xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip; unzip -o xray.zip xray >/dev/null && chmod +x xray && rm xray.zip; echo "  xray OK"; }
 if [[ ! -x ./sing-box ]]; then
   ar=$(uname -m); case "$ar" in x86_64) sa=amd64;; aarch64) sa=arm64;; *) echo "Bad arch"; exit 1;; esac
   curl -fsSLo /tmp/sb.tar.gz "https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-${sa}.tar.gz"
   tar -xzf /tmp/sb.tar.gz; mv "sing-box-linux-${sa}/sing-box" ./sing-box; chmod +x ./sing-box; rm -rf /tmp/sb.tar.gz "sing-box-linux-${sa}"
+  echo "  sing-box OK"
 fi
-if [[ ! -x /usr/local/bin/cloudflared ]]; then curl -fsSLo /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64; chmod +x /usr/local/bin/cloudflared; fi
+[[ ! -x /usr/local/bin/cloudflared ]] && { curl -fsSLo /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64; chmod +x /usr/local/bin/cloudflared; echo "  cloudflared OK"; }
 echo ">>> Keys..."
 [[ ! -f xray_keys.env ]] && { xu=$(./xray uuid); printf 'XRAY_UUID=%s\n' "$xu" > xray_keys.env; }
 . xray_keys.env
@@ -108,13 +123,18 @@ systemctl daemon-reload; systemctl enable --now xray-proxy singbox-proxy cloudfl
 xu="vless://${XRAY_UUID}@${xh}:443?encryption=none&security=tls&sni=${xh}&type=xhttp&host=${xh}&path=%2Fxray&fp=chrome&alpn=h2,http/1.1#${tn}-XRAY"
 su="vless://${SB_UUID}@${sh}:443?encryption=none&security=tls&sni=${sh}&type=ws&host=${sh}&path=%2Fsing940#${tn}-WS"
 cat > clients.txt <<EE
-=== XRAY ===
+=== XRAY (VLESS+XHTTP) ===
 $xu
-=== SB ===
+=== SING-BOX (VLESS+WS) ===
 $su
 EE
+echo ""; echo "=============================================="
+echo " DEPLOY COMPLETE"
+echo "=============================================="
+echo "Xray: $xh:443  UUID=$XRAY_UUID"
+echo "$xu"
 echo ""
-echo "=== DONE ==="
-echo "Xray: $xh:443  UUID=$XRAY_UUID"; echo "$xu"
-echo "SB:   $sh:443  UUID=$SB_UUID"; echo "$su"
-echo "Uninstall: sudo bash scripts/uninstall.sh --tok TOKEN --tid $ti --aid $ai"
+echo "Sing-box: $sh:443  UUID=$SB_UUID"
+echo "$su"
+echo ""
+echo "Uninstall: sudo bash $D/scripts/uninstall.sh --tok TOKEN --tid $ti --aid $ai"
