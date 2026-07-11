@@ -48,8 +48,8 @@ test -z "${K}" && {
     if test -n "${public_ip:-}"; then
       echo ""
       echo "=== Subscription ==="
-      echo "  v2ray:  https://${public_ip}:9091/sub"
-      echo "  clash:  https://${public_ip}:9091/clash"
+      echo "  v2ray:  http://${public_ip}:9091/sub"
+      echo "  clash:  http://${public_ip}:9091/clash"
     fi
     exit 0
   fi
@@ -250,7 +250,7 @@ cat > sb-config.json <<EOF
       "listen": "127.0.0.1",
       "listen_port": $xp,
       "users": [{"uuid": "$XRAY_UUID"}],
-      "transport": {"type": "httpupgrade", "path": "/xray"}
+      "transport": {"type": "ws", "path": "/xray"}
     },
     {
       "type": "vless",
@@ -411,7 +411,7 @@ echo ""
 echo "--- Tunnel protocols (CF Tunnel, hidden IP) ---"
 echo ""
 
-xh_uri="vless://${XRAY_UUID}@${xh}:443?encryption=none&security=tls&sni=${xh}&type=xhttp&host=${xh}&path=%2Fxray&fp=chrome#${tn}-XHTTP"
+xh_uri="vless://${XRAY_UUID}@${xh}:443?encryption=none&security=tls&sni=${xh}&type=ws&host=${xh}&path=%2Fxray&fp=chrome#${tn}-XHTTP"
 sh_uri="vless://${WS_UUID}@${sh}:443?encryption=none&security=tls&sni=${sh}&type=ws&host=${sh}&path=%2Fsing940#${tn}-WS"
 
 echo "VLESS+XHTTP:"
@@ -456,9 +456,9 @@ proxies:
     uuid: ${XRAY_UUID}
     tls: true
     client-fingerprint: chrome
-    network: httpupgrade
+    network: ws
     servername: ${xh}
-    http-opts:
+    ws-opts:
       path: "/xray"
       host: ["${xh}"]
   - name: "${tn}-WS"
@@ -541,7 +541,7 @@ for url in ['https://raw.githubusercontent.com/ip-scanner/cloudflare/main/ip.txt
 " 2>/dev/null || echo "")
 vip_ip="$vip_result"
 test -n "$vip_ip" && {
-  vip_xh="vless://${XRAY_UUID}@${vip_ip}:443?encryption=none&security=tls&sni=${xh}&type=xhttp&host=${xh}&path=%2Fxray&fp=chrome#${tn}-XHTTP-VIP"
+  vip_xh="vless://${XRAY_UUID}@${vip_ip}:443?encryption=none&security=tls&sni=${xh}&type=ws&host=${xh}&path=%2Fxray&fp=chrome#${tn}-XHTTP-VIP"
   vip_sh="vless://${WS_UUID}@${vip_ip}:443?encryption=none&security=tls&sni=${sh}&type=ws&host=${sh}&path=%2Fsing940#${tn}-WS-VIP"
 }
 
@@ -557,8 +557,8 @@ TUIC:    $tu_uri
 Reality: $re_uri
 
 === Subscription ===
-v2ray:  https://${PUBLIC_IP}:9091/sub
-clash:  https://${PUBLIC_IP}:9091/clash
+v2ray:  http://${PUBLIC_IP}:9091/sub
+clash:  http://${PUBLIC_IP}:9091/clash
 CEOF
 
 echo ""
@@ -585,8 +585,8 @@ echo ""
 echo " $re_uri"
 echo ""
 echo "--- Subscription ---"
-echo " v2ray:  https://${PUBLIC_IP}:9091/sub"
-echo " clash:  https://${PUBLIC_IP}:9091/clash"
+echo " v2ray:  http://${PUBLIC_IP}:9091/sub"
+echo " clash:  http://${PUBLIC_IP}:9091/clash"
 echo ""
 echo "=============================================="
 echo " uninstall: sudo bash $D/scripts/uninstall.sh"
