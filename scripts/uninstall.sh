@@ -3,7 +3,7 @@ set -euo pipefail
 D=/opt/proxy
 [[ $EUID -ne 0 ]] && { echo "Run as root"; exit 1; }
 
-ti=""; ai=""; zi=""; hosts=""; tn=""
+ti=""; ai=""; zi=""; hosts=""; tn=""; hp=""; tp=""; rp=""
 if test -f "$D/.state"; then
   ti=$(grep '^tunnel_id=' "$D/.state" | cut -d= -f2)
   ai=$(grep '^account_id=' "$D/.state" | cut -d= -f2)
@@ -13,15 +13,24 @@ if test -f "$D/.state"; then
 fi
 
 echo "Stopping services..."
-systemctl disable --now xray-proxy singbox-proxy cloudflared-proxy 2>/dev/null || true
-rm -f /etc/systemd/system/{xray-proxy,singbox-proxy,cloudflared-proxy}.service
+systemctl disable --now singbox-proxy cloudflared-proxy xray-proxy 2>/dev/null || true
+rm -f /etc/systemd/system/{singbox-proxy,cloudflared-proxy,xray-proxy}.service
 systemctl daemon-reload
 
 echo "Removing cloudflared..."
 rm -rf /etc/cloudflared /usr/local/bin/cloudflared
 
 echo "Removing configs..."
-rm -f "$D"/{xray_keys.env,sb_keys.env,config.json,sb-config.json,clients.txt,.state}
+rm -f "$D"/{sb_keys.env,xray_keys.env,sb-config.json,config.json,clients.txt,.state}
+rm -f "$D"/{fullchain.pem,privkey.pem}
+
+echo "Closing firewall ports..."
+for port in 8443 8444 8445; do
+  iptables -D INPUT -p tcp --dport $port -j ACCEPT 2>/dev/null || true
+  iptables -D INPUT -p udp --dport $port -j ACCEPT 2>/dev/null || true
+done
+iptables -D INPUT -p tcp --dport 20001 -j ACCEPT 2>/dev/null || true
+iptables -D INPUT -p tcp --dport 20002 -j ACCEPT 2>/dev/null || true
 
 if test -n "${ti:-}" -a -n "${ai:-}" -a -n "${zi:-}"; then
   echo ">>> CF cleanup: tunnel $ti"
@@ -30,8 +39,7 @@ if test -n "${ti:-}" -a -n "${ai:-}" -a -n "${zi:-}"; then
   test -z "$tok" && read -rp "CF API Token: " tok
   test -z "$tok" && { echo "No token, skipping CF cleanup."; exit 0; }
 
-  printf "%s" "$tok" > /tmp/_cftok_val2
-  chmod 600 /tmp/_cftok_val2
+  printf "%s" "$tok" > /tmp/_cftok_val2; chmod 600 /tmp/_cftok_val2
 
   cat > /tmp/_cf2.py << 'PY'
 import sys, json, urllib.request
