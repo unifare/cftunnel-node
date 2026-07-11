@@ -374,48 +374,116 @@ echo "Reality (VLESS):"
 echo "  $re_uri"
 echo ""
 
-# Try to fetch CF VIPs - quick timeout, best-effort
-echo ">>> CF VIP (best-effort)..."
-VIP=""
+# ── Generate subscription files ──
+echo ">>> Subscription..."
+mkdir -p "$D/sub"
+
+# v2ray sub (base64 encoded list of all URIs)
+printf '%s\n%s\n%s\n%s\n%s\n' "$xh_uri" "$sh_uri" "$hy_uri" "$tu_uri" "$re_uri" | base64 -w0 > "$D/sub/v2ray.txt"
+
+# Clash Meta YAML
+cat > "$D/sub/clash.yaml" <<YAML
+proxies:
+  - name: "${tn}-XHTTP"
+    type: vless
+    server: ${xh}
+    port: 443
+    uuid: ${XRAY_UUID}
+    tls: true
+    client-fingerprint: chrome
+    network: httpupgrade
+    servername: ${xh}
+    http-opts:
+      path: "/xray"
+      host: ["${xh}"]
+  - name: "${tn}-WS"
+    type: vless
+    server: ${sh}
+    port: 443
+    uuid: ${WS_UUID}
+    tls: true
+    network: ws
+    servername: ${sh}
+    ws-opts:
+      path: "/sing940"
+      headers:
+        Host: ${sh}
+  - name: "${tn}-HY2"
+    type: hysteria2
+    server: ${PUBLIC_IP}
+    port: ${hp}
+    password: ${HY2_PASS}
+    sni: ${REALITY_SNI}
+    skip-cert-verify: true
+  - name: "${tn}-TUIC"
+    type: tuic
+    server: ${PUBLIC_IP}
+    port: ${tp}
+    uuid: ${TUIC_UUID}
+    password: ${TUIC_PASS}
+    sni: ${REALITY_SNI}
+    alpn: ["h3"]
+    skip-cert-verify: true
+  - name: "${tn}-Reality"
+    type: vless
+    server: ${PUBLIC_IP}
+    port: ${rp}
+    uuid: ${REALITY_UUID}
+    tls: true
+    reality-opts:
+      public-key: ${REALITY_PUBKEY}
+      short-id: ""
+    servername: ${REALITY_SNI}
+    client-fingerprint: chrome
+    network: httpupgrade
+
+proxy-groups:
+  - name: "Auto"
+    type: url-test
+    proxies: ["${tn}-XHTTP", "${tn}-WS", "${tn}-HY2", "${tn}-TUIC", "${tn}-Reality"]
+    url: "http://www.gstatic.com/generate_204"
+    interval: 300
+  - name: "Tunnel"
+    type: select
+    proxies: ["${tn}-XHTTP", "${tn}-WS"]
+  - name: "Direct"
+    type: select
+    proxies: ["${tn}-HY2", "${tn}-TUIC", "${tn}-Reality"]
+
+rules:
+  - MATCH,Auto
+YAML
+
+# Symlinks for clean URLs
+ln -sf v2ray.txt "$D/sub/sub" 2>/dev/null
+ln -sf clash.yaml "$D/sub/clash" 2>/dev/null
+
+# Start sub server (kill old first)
+pkill -f 'sub/server.py' 2>/dev/null || true
+sleep 1
+nohup python3 "$D/sub/server.py" > /dev/null 2>&1 &
+sleep 1
+
+# Try CF VIP
+echo ">>> CF VIP..."
 vip_result=$(timeout 8 python3 -c "
 import urllib.request, re
-sources = [
-    'https://raw.githubusercontent.com/ip-scanner/cloudflare/main/ip.txt',
-    'https://cf.090227.xyz',
-]
-ips = []
-for url in sources:
+for url in ['https://raw.githubusercontent.com/ip-scanner/cloudflare/main/ip.txt', 'https://cf.090227.xyz']:
     try:
         data = urllib.request.urlopen(url, timeout=4).read().decode()
-        found = re.findall(r'\d+\.\d+\.\d+\.\d+', data)
-        ips.extend(found[:3])
-        if ips: break
+        ips = re.findall(r'\d+\.\d+\.\d+\.\d+', data)
+        if ips: print(ips[0]); break
     except: pass
-print(' '.join(ips[:3]))
 " 2>/dev/null || echo "")
-
-VIP="$vip_result"
-if test -n "$VIP"; then
-  # Pick first IP as VIP
-  vip_ip=$(echo "$VIP" | awk '{print $1}')
-  echo "  Using: $vip_ip"
-  echo ""
-  echo "--- 优选 IP (Tunnel) ---"
-  echo ""
+vip_ip="$vip_result"
+test -n "$vip_ip" && {
   vip_xh="vless://${XRAY_UUID}@${vip_ip}:443?encryption=none&security=tls&sni=${xh}&type=httpupgrade&host=${xh}&path=%2Fxray&fp=chrome#${tn}-XHTTP-VIP"
   vip_sh="vless://${WS_UUID}@${vip_ip}:443?encryption=none&security=tls&sni=${sh}&type=ws&host=${sh}&path=%2Fsing940#${tn}-WS-VIP"
-  echo "VLESS+XHTTP (VIP):"
-  echo "  $vip_xh"
-  echo ""
-  echo "VLESS+WS (VIP):"
-  echo "  $vip_sh"
-else
-  echo "  (skipped - no VIP source available)"
-fi
+}
 
 # Write clients.txt
 cat > clients.txt <<CEOF
-=== Tunnel (CF Tunnel) ===
+=== Tunnel (CF Tunnel, hidden IP) ===
 XHTTP: $xh_uri
 WS:    $sh_uri
 
@@ -423,10 +491,39 @@ WS:    $sh_uri
 HY2:     $hy_uri
 TUIC:    $tu_uri
 Reality: $re_uri
+
+=== Subscription ===
+v2ray:  http://${PUBLIC_IP}:9091/sub
+clash:  http://${PUBLIC_IP}:9091/clash
 CEOF
 
 echo ""
 echo "=============================================="
-echo " All links saved to $D/clients.txt"
-echo " Uninstall: sudo bash $D/scripts/uninstall.sh"
+echo " SERVER: $PUBLIC_IP"
+echo "=============================================="
+echo ""
+echo "--- Tunnel (CF Tunnel) ---"
+echo " $xh_uri"
+echo ""
+echo " $sh_uri"
+test -n "$vip_ip" && {
+  echo "--- VIP ---"
+  echo " $vip_xh"
+  echo ""
+  echo " $vip_sh"
+}
+echo ""
+echo "--- Direct ---"
+echo " $hy_uri"
+echo ""
+echo " $tu_uri"
+echo ""
+echo " $re_uri"
+echo ""
+echo "--- Subscription ---"
+echo " v2ray:  http://${PUBLIC_IP}:9091/sub"
+echo " clash:  http://${PUBLIC_IP}:9091/clash"
+echo ""
+echo "=============================================="
+echo " uninstall: sudo bash $D/scripts/uninstall.sh"
 echo "=============================================="
