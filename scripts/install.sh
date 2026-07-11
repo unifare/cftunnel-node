@@ -179,10 +179,14 @@ cat > /etc/systemd/system/xray-proxy.service <<'UNIT'
 Description=Xray Proxy
 After=network-online.target
 [Service]
-Type=simple;WorkingDirectory=/opt/proxy
+Type=simple
+WorkingDirectory=/opt/proxy
 ExecStart=/opt/proxy/xray run -c /opt/proxy/config.json
-Restart=on-failure;RestartSec=5;LimitNOFILE=65536
-[Install];WantedBy=multi-user.target
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+[Install]
+WantedBy=multi-user.target
 UNIT
 
 cat > /etc/systemd/system/singbox-proxy.service <<'UNIT'
@@ -190,10 +194,14 @@ cat > /etc/systemd/system/singbox-proxy.service <<'UNIT'
 Description=Sing-box Proxy
 After=network-online.target
 [Service]
-Type=simple;WorkingDirectory=/opt/proxy
+Type=simple
+WorkingDirectory=/opt/proxy
 ExecStart=/opt/proxy/sing-box run -c /opt/proxy/sb-config.json
-Restart=on-failure;RestartSec=5;LimitNOFILE=65536
-[Install];WantedBy=multi-user.target
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+[Install]
+WantedBy=multi-user.target
 UNIT
 
 cat > /etc/systemd/system/cloudflared-proxy.service <<UNIT
