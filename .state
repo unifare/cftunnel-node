@@ -1,0 +1,7 @@
+tunnel_id=13ee11c7-9928-4ed7-ab6d-ac7a4fdcb501
+tunnel_name=vps-acm3rgz3
+account_id=4a82b2eb7aeaa5ed7711a407dbf14c2f
+zone_id=38128169c29daac5445cd9455e2bfc9e
+zone_name=ww11.kdns.fr
+hosts=acm3rgz3.ww11.kdns.fr,acm3rgz3-ws.ww11.kdns.fr
+created=2026-07-10T20:47:44-07:00

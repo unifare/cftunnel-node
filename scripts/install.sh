@@ -211,8 +211,11 @@ After=network-online.target xray-proxy.service singbox-proxy.service
 [Service]
 Type=notify
 ExecStart=/usr/local/bin/cloudflared tunnel --config /etc/cloudflared/config.yml --no-autoupdate run --token ${tk}
-Restart=on-failure;RestartSec=5;LimitNOFILE=65536
-[Install];WantedBy=multi-user.target
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+[Install]
+WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
