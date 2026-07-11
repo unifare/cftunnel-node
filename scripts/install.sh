@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 D=/opt/proxy; A="https://api.cloudflare.com/client/v4"
-t="";z="";xh="";sh="";xp=20001;sp=20002;tn=""
+t="";xh="";sh="";xp=20001;sp=20002;tn=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --tok)         t="$2"; shift 2 ;;
-    --zone)        z="$2"; shift 2 ;;
     --xray-host)   xh="$2"; shift 2 ;;
     --sb-host)     sh="$2"; shift 2 ;;
     --xray-port)   xp="$2"; shift 2 ;;
@@ -14,25 +13,30 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown: $1"; exit 1 ;;
   esac
 done
-xh="${xh:-xray.${z}}";sh="${sh:-sb.${z}}"
-tn="${tn:-vps-$(tr -dc a-z0-9 < /dev/urandom | head -c8)}"
-[[ -z "${t}" || -z "${z}" ]] && { echo "Usage: --tok TOKEN --zone example.com"; exit 1; }
+[[ -z "${t}" ]] && { echo "Usage: sudo bash install.sh --tok <CF_API_TOKEN>"; exit 1; }
 [[ $EUID -ne 0 ]] && { echo "Run as root"; exit 1; }
-echo "=== Zone:$z Xray:$xh:$xp SB:$sh:$sp ==="
 apt-get update -qq && apt-get install -y -qq jq curl unzip 2>/dev/null
 _c() {
   local m="$1" p="$2" d="${3:-}"
-  if [[ -n "$d" ]]; then curl -sf -X "$m" -H "Authorization: Bearer ${t}" -H "Content-Type: application/json" "$A$p" -d "$d"
-  else curl -sf -X "$m" -H "Authorization: Bearer ${t}" "$A$p"; fi
+  if [[ -n "$d" ]]; then curl -sf -X "$m" -H "Authorization: Bearer *** -H "Content-Type: application/json" "$A$p" -d "$d"
+  else curl -sf -X "$m" -H "Authorization: Bearer *** "$A$p"; fi
 }
-echo ">>> Verify..."
+echo ">>> Verify token..."
 _c GET /user/tokens/verify | python3 -c "import sys,json;sys.exit(0 if json.load(sys.stdin).get('success') else 1)" || { echo "BAD TOKEN"; exit 1; }
 echo ">>> Account..."
 ai=$(_c GET /accounts | jq -r '.result[0].id')
 [[ -z "$ai" || "$ai" == "null" ]] && { echo "No account"; exit 1; }
-echo ">>> Zone..."
+echo ">>> Zone (auto-detect)..."
+z=$(_c GET "/zones?per_page=1&status=active" | jq -r '.result[0].name')
+[[ -z "$z" || "$z" == "null" ]] && { echo "No active zone found"; exit 1; }
 zi=$(_c GET "/zones?name=$z" | jq -r '.result[0].id')
-[[ -z "$zi" || "$zi" == "null" ]] && { echo "Zone not found"; exit 1; }
+echo "  Using: $z"
+# Random prefix for hostnames
+pf=$(tr -dc a-z0-9 < /dev/urandom | head -c8)
+xh="${xh:-${pf}.${z}}"
+sh="${sh:-${pf}-ws.${z}}"
+tn="${tn:-vps-${pf}}"
+echo "=== Zone:$z Xray:$xh:$xp SB:$sh:$sp Tunnel:$tn ==="
 echo ">>> Tunnel..."
 ts=$(python3 -c "import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())")
 ti=$(_c POST "/accounts/$ai/tunnels" "{\"name\":\"$tn\",\"tunnel_secret\":\"$ts\"}" | jq -r '.result.id')
