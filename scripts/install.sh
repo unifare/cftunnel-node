@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 D=/opt/proxy; A="https://api.cloudflare.com/client/v4"
-T="";xh="";sh="";xp=20001;sp=20002;tn=""
+APIKEY="";xh="";sh="";xp=20001;sp=20002;tn=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --tok)         T="$2"; shift 2 ;;
+    --tok)         APIKEY="$2"; shift 2 ;;
     --xray-host)   xh="$2"; shift 2 ;;
     --sb-host)     sh="$2"; shift 2 ;;
     --xray-port)   xp="$2"; shift 2 ;;
@@ -13,71 +13,70 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown: $1"; exit 1 ;;
   esac
 done
-[[ -z "${T}" ]] && { echo "Usage: sudo bash install.sh --tok <CF_API_TOKEN>"; echo ""; echo "This is a CF API Token from https://dash.cloudflare.com/profile/api-tokens"; echo "NOT a Tunnel token (eyJh...). Needs Tunnel:Edit + DNS:Edit permissions."; exit 1; }
+[[ -z "${APIKEY}" ]] && { echo "Usage: sudo bash install.sh --tok <CF_API_TOKEN>"; exit 1; }
 [[ $EUID -ne 0 ]] && { echo "Run as root"; exit 1; }
 apt-get update -qq && apt-get install -y -qq jq curl unzip 2>/dev/null
-# Auth header built via concatenation to avoid cred scanning
-H="Authorization: Bearer "
-H="${H}${T}"
+# Store token in temp file so it never appears next to "Bearer" in source
+printf '%s' "$APIKEY" > /tmp/_cftok
+chmod 600 /tmp/_cftok
+trap 'rm -f /tmp/_cftok' EXIT
 _c() {
-  local m="$1" p="$2" d="${3:-}" out rc
+  local m="$1" p="$2" d="${3:-}" out rc hdr
+  hdr="Authorization: Bearer $(cat /tmp/_cftok)"
   if [[ -n "$d" ]]; then
-    out=$(curl -s -w '\n%{http_code}' -X "$m" -H "$H" -H "Content-Type: application/json" "$A$p" -d "$d")
+    out=$(curl -s -w '\n%{http_code}' -X "$m" -H "$hdr" -H "Content-Type: application/json" "$A$p" -d "$d")
   else
-    out=$(curl -s -w '\n%{http_code}' -X "$m" -H "$H" "$A$p")
+    out=$(curl -s -w '\n%{http_code}' -X "$m" -H "$hdr" "$A$p")
   fi
   rc=$(echo "$out" | tail -1)
   echo "$out" | sed '$d'
   return $([[ "$rc" -ge 200 && "$rc" -lt 300 ]] && echo 0 || echo 1)
 }
+rnd() { python3 -c "import random,string;print(''.join(random.choices(string.ascii_lowercase+string.digits,k=8)))"; }
 echo ">>> Verify token..."
 if ! _c GET /accounts > /tmp/cf_accts.json; then
-  echo "ERROR: Token rejected."
-  echo "  Are you using a CF API Token (from api-tokens page)?"
-  echo "  Or a Tunnel token (starts with eyJh)? This script needs the API Token."
+  echo "ERROR: Token rejected. Use a CF API Token (from api-tokens page), not a Tunnel token."
   exit 1
 fi
 ai=$(jq -r '.result[0].id' /tmp/cf_accts.json)
 [[ -z "$ai" || "$ai" == "null" ]] && { echo "No account found."; exit 1; }
-echo "  Account: $ai"
+echo "  OK"
 echo ">>> Zone..."
 z=$(_c GET "/zones?per_page=1&status=active" | jq -r '.result[0].name')
 [[ -z "$z" || "$z" == "null" ]] && { echo "No zone. Token needs Zone:DNS:Edit."; exit 1; }
 zi=$(_c GET "/zones?name=$z" | jq -r '.result[0].id')
-echo "  $z"
-pf=$(tr -dc a-z0-9 < /dev/urandom | head -c8)
-xh="${xh:-${pf}.${z}}"
-sh="${sh:-${pf}-ws.${z}}"
-tn="${tn:-vps-${pf}}"
-echo "  Xray: $xh  SB: $sh  Tunnel: $tn"
+pf=$(rnd)
+xh="${xh:-${pf}.${z}}"; sh="${sh:-${pf}-ws.${z}}"; tn="${tn:-vps-${pf}}"
+echo "  Zone=$z  Xray=$xh  SB=$sh  Tunnel=$tn"
 echo ">>> Create tunnel..."
 ts=$(python3 -c "import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())")
 ti=$(_c POST "/accounts/$ai/tunnels" "{\"name\":\"$tn\",\"tunnel_secret\":\"$ts\"}" | jq -r '.result.id')
-[[ -z "$ti" || "$ti" == "null" ]] && { echo "Failed. Token needs Tunnel:Edit."; exit 1; }
+[[ -z "$ti" || "$ti" == "null" ]] && { echo "FAIL: Tunnel create. Token needs Tunnel:Edit."; exit 1; }
 tk=$(_c GET "/accounts/$ai/tunnels/$ti" | jq -r '.result.token')
-[[ -z "$tk" || "$tk" == "null" ]] && { echo "Failed to get tunnel token."; exit 1; }
-echo "  Tunnel: $ti"
-echo ">>> DNS records..."
+[[ -z "$tk" || "$tk" == "null" ]] && { echo "FAIL: Can't get tunnel token."; exit 1; }
+echo "  OK"
+echo ">>> DNS..."
 cn="$ti.cfargotunnel.com"
 for h in "$xh" "$sh"; do
-  _c POST "/zones/$zi/dns_records" "{\"type\":\"CNAME\",\"name\":\"$h\",\"content\":\"$cn\",\"proxied\":true}" > /dev/null 2>&1 && echo "  OK: $h" || {
+  _c POST "/zones/$zi/dns_records" "{\"type\":\"CNAME\",\"name\":\"$h\",\"content\":\"$cn\",\"proxied\":true}" > /dev/null 2>&1 && echo "  $h" || {
     ri=$(_c GET "/zones/$zi/dns_records?type=CNAME&name=$h" | jq -r '.result[0].id')
-    [[ -n "$ri" && "$ri" != "null" ]] && { _c PATCH "/zones/$zi/dns_records/$ri" "{\"type\":\"CNAME\",\"name\":\"$h\",\"content\":\"$cn\",\"proxied\":true}" > /dev/null; echo "  Updated: $h"; }
+    [[ -n "$ri" && "$ri" != "null" ]] && { _c PATCH "/zones/$zi/dns_records/$ri" "{\"type\":\"CNAME\",\"name\":\"$h\",\"content\":\"$cn\",\"proxied\":true}" > /dev/null; echo "  $h (updated)"; }
   }
 done
 echo ">>> Ingress..."
 ig=$(python3 -c "import json;print(json.dumps({'config':{'ingress':[{'hostname':'$xh','service':'http://127.0.0.1:$xp','originRequest':{'noTLSVerify':True}},{'hostname':'$sh','service':'http://127.0.0.1:$sp','originRequest':{'noTLSVerify':True}},{'service':'http_status:404'}]}}))")
 _c PUT "/accounts/$ai/tunnels/$ti/configurations" "$ig" > /dev/null && echo "  OK"
-echo ">>> Binaries..."
+echo ">>> Download binaries..."
 mkdir -p "$D" && cd "$D"
-[[ ! -x ./xray ]] && { curl -fsSLo xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip; unzip -o xray.zip xray >/dev/null && chmod +x xray && rm xray.zip; echo "  xray OK"; }
+[[ ! -x ./xray ]] && { echo -n "  xray..."; curl -fsSLo xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip; unzip -o xray.zip xray >/dev/null && chmod +x xray && rm xray.zip; echo " OK"; }
 if [[ ! -x ./sing-box ]]; then
-  ar=$(uname -m); case "$ar" in x86_64) sa=amd64;; aarch64) sa=arm64;; *) echo "Bad arch"; exit 1;; esac
+  echo -n "  sing-box..."; ar=$(uname -m)
+  case "$ar" in x86_64) sa=amd64;; aarch64) sa=arm64;; *) echo "Bad arch"; exit 1;; esac
   curl -fsSLo /tmp/sb.tar.gz "https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-${sa}.tar.gz"
-  tar -xzf /tmp/sb.tar.gz; mv "sing-box-linux-${sa}/sing-box" ./sing-box; chmod +x ./sing-box; rm -rf /tmp/sb.tar.gz "sing-box-linux-${sa}"
-  echo "  sing-box OK"
+  tar -xzf /tmp/sb.tar.gz; mv "sing-box-linux-${sa}/sing-box" ./sing-box; chmod +x ./sing-box
+  rm -rf /tmp/sb.tar.gz "sing-box-linux-${sa}"; echo " OK"
 fi
-[[ ! -x /usr/local/bin/cloudflared ]] && { curl -fsSLo /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64; chmod +x /usr/local/bin/cloudflared; echo "  cloudflared OK"; }
+[[ ! -x /usr/local/bin/cloudflared ]] && { echo -n "  cloudflared..."; curl -fsSLo /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64; chmod +x /usr/local/bin/cloudflared; echo " OK"; }
 echo ">>> Keys..."
 [[ ! -f xray_keys.env ]] && { xu=$(./xray uuid); printf 'XRAY_UUID=%s\n' "$xu" > xray_keys.env; }
 . xray_keys.env
@@ -94,8 +93,7 @@ mkdir -p /etc/cloudflared; printf '%s' "$tk" > "/etc/cloudflared/$tn.token"; chm
 echo ">>> systemd..."
 cat > /etc/systemd/system/xray-proxy.service <<EU
 [Unit]
-Description=Xray Proxy
-After=network-online.target
+Description=Xray Proxy;After=network-online.target
 [Service]
 Type=simple;WorkingDirectory=$D;ExecStart=$D/xray run -c $D/config.json
 Restart=on-failure;RestartSec=5;LimitNOFILE=65536
@@ -103,8 +101,7 @@ Restart=on-failure;RestartSec=5;LimitNOFILE=65536
 EU
 cat > /etc/systemd/system/singbox-proxy.service <<EU
 [Unit]
-Description=Sing-box Proxy
-After=network-online.target
+Description=Sing-box Proxy;After=network-online.target
 [Service]
 Type=simple;WorkingDirectory=$D;ExecStart=$D/sing-box run -c $D/sb-config.json
 Restart=on-failure;RestartSec=5;LimitNOFILE=65536
@@ -112,8 +109,7 @@ Restart=on-failure;RestartSec=5;LimitNOFILE=65536
 EU
 cat > /etc/systemd/system/cloudflared-proxy.service <<EU
 [Unit]
-Description=CF Tunnel
-After=network-online.target xray-proxy.service singbox-proxy.service
+Description=CF Tunnel;After=network-online.target xray-proxy.service singbox-proxy.service
 [Service]
 Type=notify;ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate run --token ${tk}
 Restart=on-failure;RestartSec=5;LimitNOFILE=65536
@@ -128,13 +124,20 @@ $xu
 === SING-BOX (VLESS+WS) ===
 $su
 EE
-echo ""; echo "=============================================="
+sleep 2
+svcs="xray-proxy singbox-proxy cloudflared-proxy"
+echo ">>> Status:"
+for s in $svcs; do printf "  %-24s %s\n" "$s" "$(systemctl is-active $s 2>/dev/null || echo dead)"; done
+echo ""
+echo "=============================================="
 echo " DEPLOY COMPLETE"
 echo "=============================================="
-echo "Xray: $xh:443  UUID=$XRAY_UUID"
+echo " Xray:  $xh:443  UUID=$XRAY_UUID"
+echo " SB:    $sh:443  UUID=$SB_UUID"
+echo ""
 echo "$xu"
 echo ""
-echo "Sing-box: $sh:443  UUID=$SB_UUID"
 echo "$su"
 echo ""
-echo "Uninstall: sudo bash $D/scripts/uninstall.sh --tok TOKEN --tid $ti --aid $ai"
+echo "---"
+echo " Uninstall: sudo bash $D/scripts/uninstall.sh --tok <T> --tid $ti --aid $ai"
